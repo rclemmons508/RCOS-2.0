@@ -1,0 +1,6 @@
+{
+  "name": "RCOS Multi-Agent OS",
+  "description": "Enterprise Multi-Agent AI system designed to adapt to company workflows, reduce workload, and manage autonomous agents with onboarding customization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
