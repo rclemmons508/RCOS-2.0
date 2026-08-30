@@ -378,11 +378,6 @@ firebase emulators:start --only functions
 
 # You'll see:
 # ✔  functions: Local server running at http://localhost:5001
-
-# In another terminal, test a function (example):
-curl -X POST http://localhost:5001/rclemmons508-rcos-2-0/us-central1/spawnAgent \
-  -H "Content-Type: application/json" \
-  -d '{"agentId":"test-agent","industry":"Tech","bottleneck":"Support tickets"}'
 ```
 
 ## Step 5: Deploy to Firebase
@@ -390,21 +385,13 @@ curl -X POST http://localhost:5001/rclemmons508-rcos-2-0/us-central1/spawnAgent 
 ```bash
 # From RCOS-2.0 directory
 firebase deploy --only functions
-
-# You'll see deployment status and URLs
-# Functions are now live!
 ```
 
 ## Step 6: Set Environment Variables
 
-Cloud Functions need the Gemini API key:
-
 ```bash
-# Set environment variable
+# Set Gemini API key
 firebase functions:config:set gemini.api_key="your_key_here"
-
-# Or set it in functions/index.js:
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'your_key_here';
 ```
 
 ## Step 7: Verify Deployment
@@ -415,61 +402,7 @@ firebase functions:log
 
 # List deployed functions
 firebase functions:list
-
-# Delete a function if needed
-firebase functions:delete spawnAgent
 ```
-
-## Using Functions from Android App
-
-The app calls functions using Firebase SDK. Example from `NovaViewModel.kt`:
-
-```kotlin
-private val functions = Firebase.functions
-
-fun spawnAgent(agentId: String, industry: String, bottleneck: String) {
-    functions.getHttpsCallable("spawnAgent")
-        .call(mapOf(
-            "agentId" to agentId,
-            "industry" to industry,
-            "bottleneck" to bottleneck
-        ))
-        .addOnSuccessListener { result ->
-            val response = result.data as? Map<*, *>
-            Log.d("Agent", "Success: ${response?.get("response")}")
-        }
-        .addOnFailureListener { error ->
-            Log.e("Agent", "Error: ${error.message}")
-        }
-}
-```
-
-## Troubleshooting
-
-### Functions won't deploy
-```bash
-# Check function syntax
-./gradlew lintKotlin
-
-# Verify Firebase config
-firebase projects:list
-
-# Check project default
-firebase use RCOS-2.0
-```
-
-### Gemini API errors in functions
-```bash
-# Verify API key is set
-firebase functions:config:get
-
-# View function logs for details
-firebase functions:log --limit 50
-```
-
-### Firestore permissions errors
-- Update security rules in Firestore Console
-- See FIRESTORE_RULES.md
 
 ---
 

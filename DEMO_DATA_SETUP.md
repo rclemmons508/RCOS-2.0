@@ -23,30 +23,6 @@ We'll create:
    - Password: `Demo@12345`
 6. Note the User ID (copy it)
 
-### Via Firebase CLI
-```bash
-# Install firebase-tools if not already done
-npm install -g firebase-tools
-firebase auth:import users.json --hash-algo=scrypt
-
-# Create users.json with:
-```
-
-```json
-[
-  {
-    "localId": "demo-user-001",
-    "email": "demo@rcos.demo",
-    "emailVerified": true,
-    "passwordHash": "fakeHashValue",
-    "salt": "fakeSaltValue",
-    "createdAt": 1630000000000,
-    "lastLoginAt": 1630000000000,
-    "customAttributes": "{}"
-  }
-]
-```
-
 ## Step 2: Create Firestore Sample Data
 
 Create `firestore_seed.js`:
@@ -118,14 +94,6 @@ async function seedData() {
         type: 'knowledge',
         capabilities: ['search', 'context_retrieval', 'answer_generation'],
         status: 'active'
-      },
-      {
-        id: 'lead-qualifier',
-        name: 'Lead Qualifier',
-        description: 'Qualifies and scores sales leads',
-        type: 'sales',
-        capabilities: ['lead_scoring', 'qualification', 'assignment'],
-        status: 'active'
       }
     ];
 
@@ -144,16 +112,6 @@ async function seedData() {
         industry: 'Technology',
         agents: ['email-handler', 'ticket-resolver', 'knowledge-bot'],
         expectedReduction: 60,
-        status: 'active',
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      },
-      {
-        id: 'workflow-sales',
-        name: 'Lead Qualification Pipeline',
-        description: 'Qualifies and scores incoming sales leads',
-        industry: 'Technology',
-        agents: ['lead-qualifier'],
-        expectedReduction: 45,
         status: 'active',
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       }
@@ -200,52 +158,6 @@ async function seedData() {
           timeReducedPercent: 58,
           costSavings: '$234'
         }
-      },
-      {
-        id: 'job-002',
-        workflowId: 'workflow-support',
-        status: 'completed',
-        createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
-        completedAt: new Date(Date.now() - 47 * 60 * 60 * 1000),
-        results: [
-          {
-            agentType: 'email-handler',
-            ticketsProcessed: 52,
-            categorized: 52
-          },
-          {
-            agentType: 'ticket-resolver',
-            resolved: 35,
-            escalated: 17
-          }
-        ],
-        stats: {
-          ticketsProcessed: 52,
-          ticketsResolved: 35,
-          resolutionRate: 67,
-          timeReducedPercent: 61
-        }
-      },
-      {
-        id: 'job-003',
-        workflowId: 'workflow-sales',
-        status: 'completed',
-        createdAt: new Date(Date.now() - 12 * 60 * 60 * 1000),
-        completedAt: new Date(Date.now() - 11 * 60 * 60 * 1000),
-        results: [
-          {
-            agentType: 'lead-qualifier',
-            leadsProcessed: 156,
-            qualified: 68,
-            qualificationRate: 44
-          }
-        ],
-        stats: {
-          leadsProcessed: 156,
-          qualified: 68,
-          timeReducedPercent: 45,
-          costPerLead: '$12'
-        }
       }
     ];
 
@@ -256,74 +168,10 @@ async function seedData() {
         .collection('jobs').doc(id).set(job);
     }
 
-    // 6. Create Chat History
-    console.log('💬 Creating chat history...');
-    const chats = [
-      {
-        role: 'user',
-        content: 'How can I reduce support ticket volume?',
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
-      },
-      {
-        role: 'assistant',
-        content: `Based on your company profile, I recommend:
-
-1. **Email Handler Agent**: Automatically categorize incoming support emails into categories (bug, feature request, billing, etc.)
-
-2. **Knowledge Bot**: Deploy a bot that searches your knowledge base and FAQs to provide instant answers to 60% of common questions
-
-3. **Ticket Resolver**: Use AI to suggest solutions and auto-resolve tickets where confidence is high
-
-Expected results: 58-61% reduction in manual support hours, 66% auto-resolution rate`,
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
-      }
-    ];
-
-    for (const chat of chats) {
-      await db.collection('users').doc(DEMO_USER_ID)
-        .collection('chatHistory').add(chat);
-    }
-
-    // 7. Create Audit Log
-    console.log('📋 Creating audit log...');
-    const auditLogs = [
-      {
-        action: 'LOGIN',
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        details: { method: 'email' }
-      },
-      {
-        action: 'PROFILE_CREATED',
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        details: { industry: 'Technology' }
-      },
-      {
-        action: 'WORKFLOW_CREATED',
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        details: { workflowId: 'workflow-support' }
-      },
-      {
-        action: 'JOB_EXECUTED',
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-        details: { jobId: 'job-001', workflowId: 'workflow-support' }
-      }
-    ];
-
-    for (const log of auditLogs) {
-      await db.collection('users').doc(DEMO_USER_ID)
-        .collection('auditLogs').add(log);
-    }
-
     console.log('\n✨ Demo data seeded successfully!');
-    console.log(`📧 Demo credentials:`);
+    console.log('📧 Demo credentials:');
     console.log(`   Email: demo@rcos.demo`);
     console.log(`   Password: Demo@12345`);
-    console.log(`\n🎯 Try these actions in the app:`);
-    console.log(`   1. Login with demo account`);
-    console.log(`   2. View Dashboard - see job execution results`);
-    console.log(`   3. Go to Workflows - see pre-built automation workflows`);
-    console.log(`   4. Chat screen - ask "How can I automate my business?"`);
-    console.log(`   5. View Jobs history - see execution details and stats`);
 
     process.exit(0);
   } catch (error) {
@@ -341,11 +189,10 @@ seedData();
 2. Click "Service Accounts" tab
 3. Click "Generate new private key"
 4. Save as `service-account-key.json` in RCOS-2.0 directory
-5. **Add to .gitignore** (never commit this!)
-
-```bash
-echo "service-account-key.json" >> .gitignore
-```
+5. **Add to .gitignore**:
+   ```bash
+   echo "service-account-key.json" >> .gitignore
+   ```
 
 ## Step 4: Run Data Seeding Script
 
@@ -360,8 +207,6 @@ node firestore_seed.js
 # 🤖 Creating agent registry...
 # ⚙️ Creating workflows...
 # ✅ Creating sample jobs...
-# 💬 Creating chat history...
-# 📋 Creating audit log...
 #
 # ✨ Demo data seeded successfully!
 # 📧 Demo credentials:
@@ -375,73 +220,13 @@ node firestore_seed.js
 2. Login with:
    - Email: `demo@rcos.demo`
    - Password: `Demo@12345`
-3. You should see:
-   - Dashboard with company profile
-   - Workflow cards showing automation opportunities
-   - Job history with execution results
-   - Agent registry
-
-## Viewing Data in Firebase Console
-
-1. Go to https://console.firebase.google.com
-2. Select RCOS-2.0 project
-3. Go to Firestore Database
-4. Browse collections:
-   - users/demo-user-001/companyProfile
-   - users/demo-user-001/workflows
-   - users/demo-user-001/jobs
-   - users/demo-user-001/agentRegistry
-   - users/demo-user-001/chatHistory
-
-## Creating Additional Demo Users
-
-Edit `firestore_seed.js` and create another user:
-
-```javascript
-const DEMO_USER_ID = 'demo-user-002'; // Different user
-
-// Update company profile:
-await db.collection('users').doc(DEMO_USER_ID)
-  .collection('companyProfile').doc('main').set({
-    name: 'Tech Startup Demo',
-    industry: 'Finance',  // Different industry
-    size: '20-50 employees',
-    bottleneck: 'Lead generation and qualification',
-    targetReduction: 50
-  });
-```
-
-## Backup and Restore
-
-### Export Firestore Data
-```bash
-firebase firestore:export ./backups/demo-data-backup
-```
-
-### Restore from Backup
-```bash
-firebase firestore:import ./backups/demo-data-backup
-```
-
-## Cleanup (Reset Demo)
-
-If you need to clear all demo data:
-
-```bash
-firebase firestore:delete --recursive --yes
-```
-
-Then re-run the seeding script.
+3. You should see demo workflows and job history
 
 ---
 
 ## Summary
 
 ✅ Demo user created
-✅ Company profile seeded
-✅ Workflows created
-✅ Agent registry populated
+✅ Workflows pre-built
 ✅ Sample jobs with results
-✅ Chat history added
-✅ Audit trail created
 ✅ Ready for customer demo!
