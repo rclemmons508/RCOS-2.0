@@ -6,16 +6,22 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-class SecureCredentialManager(context: Context) {
+class SecureCredentialManager(private val context: Context) {
 
-    private val masterKey: MasterKey by lazy {
-        MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
+    private val fallbackPrefs: SharedPreferences by lazy {
+        context.getSharedPreferences("rcos_secure_fallback_prefs", Context.MODE_PRIVATE)
     }
 
-    private val encryptedPrefs: SharedPreferences by lazy {
+    private val insecurePrefs: SharedPreferences by lazy {
+        context.getSharedPreferences("rcos_user_prefs", Context.MODE_PRIVATE)
+    }
+
+    private val encryptedPrefs: SharedPreferences? by lazy {
         try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+
             EncryptedSharedPreferences.create(
                 context,
                 "rcos_secure_keystore_prefs_v1",
@@ -23,18 +29,23 @@ class SecureCredentialManager(context: Context) {
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
-        } catch (e: Exception) {
-            Log.e("SecureCredentialManager", "Failed to initialize EncryptedSharedPreferences, fallback to secure private prefs", e)
-            context.getSharedPreferences("rcos_secure_fallback_prefs", Context.MODE_PRIVATE)
+        } catch (t: Throwable) {
+            Log.w("SecureCredentialManager", "EncryptedSharedPreferences unavailable, falling back to private prefs: ${t.message}")
+            null
         }
     }
 
-    private val insecurePrefs: SharedPreferences =
-        context.getSharedPreferences("rcos_user_prefs", Context.MODE_PRIVATE)
+    private fun getActivePrefs(): SharedPreferences {
+        return encryptedPrefs ?: fallbackPrefs
+    }
 
     init {
-        migrateInsecurePreferences()
-        seedInitialDefaultVaultIfNeeded()
+        try {
+            migrateInsecurePreferences()
+            seedInitialDefaultVaultIfNeeded()
+        } catch (t: Throwable) {
+            Log.w("SecureCredentialManager", "Init migration/seeding notice: ${t.message}")
+        }
     }
 
     private fun migrateInsecurePreferences() {
@@ -51,7 +62,8 @@ class SecureCredentialManager(context: Context) {
                 "profile_timezone"
             )
 
-            val editor = encryptedPrefs.edit()
+            val active = getActivePrefs()
+            val editor = active.edit()
             val insecureEditor = insecurePrefs.edit()
             var migrated = false
 
@@ -69,55 +81,94 @@ class SecureCredentialManager(context: Context) {
             if (migrated) {
                 editor.apply()
                 insecureEditor.apply()
-                Log.d("SecureCredentialManager", "Successfully migrated sensitive preferences to Android Keystore EncryptedSharedPreferences")
+                Log.d("SecureCredentialManager", "Migrated sensitive preferences to secure store")
             }
-        } catch (e: Exception) {
-            Log.e("SecureCredentialManager", "Error during preferences migration", e)
+        } catch (t: Throwable) {
+            Log.w("SecureCredentialManager", "Error during preferences migration: ${t.message}")
         }
     }
 
     private fun seedInitialDefaultVaultIfNeeded() {
-        if (getVaultKeys().isEmpty()) {
-            saveVaultItem(
-                id = "gemini_api_key",
-                name = "Gemini Pro Multi-Modal API Key",
-                secretValue = "AIzaSy_KeystoreProtected_GeminiToken_2026",
-                category = "AI Service Token"
-            )
-            saveVaultItem(
-                id = "google_workspace_oauth",
-                name = "Google Workspace Service OAuth Secret",
-                secretValue = "GOWS_sec_994827103847_rcos_enterprise",
-                category = "OAuth2 Client Secret"
-            )
-            saveVaultItem(
-                id = "microsoft_azure_token",
-                name = "Microsoft 365 Azure AD App Key",
-                secretValue = "MS365_azure_secret_882910394726102",
-                category = "Enterprise Auth Token"
-            )
+        try {
+            if (getVaultKeys().isEmpty()) {
+                saveVaultItem(
+                    id = "gemini_api_key",
+                    name = "Gemini Pro Multi-Modal API Key",
+                    secretValue = "AIzaSy_KeystoreProtected_GeminiToken_2026",
+                    category = "AI Service Token"
+                )
+                saveVaultItem(
+                    id = "google_workspace_oauth",
+                    name = "Google Workspace Service OAuth Secret",
+                    secretValue = "GOWS_sec_994827103847_rcos_enterprise",
+                    category = "OAuth2 Client Secret"
+                )
+                saveVaultItem(
+                    id = "microsoft_azure_token",
+                    name = "Microsoft 365 Azure AD App Key",
+                    secretValue = "MS365_azure_secret_882910394726102",
+                    category = "Enterprise Auth Token"
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w("SecureCredentialManager", "Failed to seed default vault: ${t.message}")
         }
     }
 
     fun saveString(key: String, value: String) {
-        encryptedPrefs.edit().putString(key, value).apply()
+        try {
+            getActivePrefs().edit().putString(key, value).apply()
+        } catch (t: Throwable) {
+            Log.w("SecureCredentialManager", "saveString failed on primary prefs, saving to fallback: ${t.message}")
+            try {
+                fallbackPrefs.edit().putString(key, value).apply()
+            } catch (ignored: Throwable) {}
+        }
     }
 
     fun getString(key: String, defaultValue: String = ""): String {
-        return encryptedPrefs.getString(key, defaultValue) ?: defaultValue
+        return try {
+            getActivePrefs().getString(key, defaultValue) ?: defaultValue
+        } catch (t: Throwable) {
+            try {
+                fallbackPrefs.getString(key, defaultValue) ?: defaultValue
+            } catch (ignored: Throwable) {
+                defaultValue
+            }
+        }
     }
 
     fun getNullableString(key: String): String? {
-        return if (encryptedPrefs.contains(key)) encryptedPrefs.getString(key, null) else null
+        return try {
+            val prefs = getActivePrefs()
+            if (prefs.contains(key)) prefs.getString(key, null) else null
+        } catch (t: Throwable) {
+            try {
+                if (fallbackPrefs.contains(key)) fallbackPrefs.getString(key, null) else null
+            } catch (ignored: Throwable) {
+                null
+            }
+        }
     }
 
     fun remove(key: String) {
-        encryptedPrefs.edit().remove(key).apply()
+        try {
+            getActivePrefs().edit().remove(key).apply()
+        } catch (t: Throwable) {
+            try {
+                fallbackPrefs.edit().remove(key).apply()
+            } catch (ignored: Throwable) {}
+        }
     }
 
     fun clearAll() {
-        encryptedPrefs.edit().clear().apply()
-        insecurePrefs.edit().clear().apply()
+        try {
+            getActivePrefs().edit().clear().apply()
+            insecurePrefs.edit().clear().apply()
+            fallbackPrefs.edit().clear().apply()
+        } catch (t: Throwable) {
+            Log.w("SecureCredentialManager", "Error in clearAll: ${t.message}")
+        }
     }
 
     // Vault Credentials Management (Android Keystore Encrypted)
@@ -132,15 +183,16 @@ class SecureCredentialManager(context: Context) {
     }
 
     fun getVaultKeys(): List<String> {
-        val raw = getString("vault_keys_list", "") ?: ""
+        val raw = getString("vault_keys_list", "")
         if (raw.isBlank()) return emptyList()
         return raw.split(",").filter { it.isNotBlank() }
     }
 
     fun getVaultItem(id: String): VaultItem? {
-        val name = getString("vault_name_$id") ?: return null
-        val secret = getString("vault_secret_$id") ?: ""
-        val category = getString("vault_category_$id") ?: "API Key"
+        val name = getString("vault_name_$id")
+        if (name.isBlank()) return null
+        val secret = getString("vault_secret_$id")
+        val category = getString("vault_category_$id").ifBlank { "API Key" }
         return VaultItem(id, name, secret, category)
     }
 

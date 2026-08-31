@@ -18,6 +18,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.ui.NovaViewModel
 import com.example.ui.components.AdaptiveNavigationLayout
+import com.example.ui.components.AgentDashboard
 import com.example.ui.components.OnboardingDialog
 import com.example.ui.screens.*
 import com.example.ui.theme.NovaDashboardTheme
@@ -172,6 +173,13 @@ fun NovaAppMainScreen(viewModel: NovaViewModel) {
                 composable("agents") {
                     AgentRegistryView(viewModel = viewModel)
                 }
+                composable("agent_dashboard") {
+                    AgentDashboard(
+                        viewModel = viewModel,
+                        onNavigateToWorkflows = { navController.navigate("workflow") },
+                        onNavigateToRegistry = { navController.navigate("agents") }
+                    )
+                }
             }
         }
 
@@ -181,6 +189,7 @@ fun NovaAppMainScreen(viewModel: NovaViewModel) {
                 currentProfile = companyProfile,
                 onDismiss = { showOnboardingDialog = false },
                 onSaveProfile = { company, ind, bottleneck, targetPct, agents, customRules ->
+                    showOnboardingDialog = false
                     viewModel.saveOnboardingProfile(
                         companyName = company,
                         industry = ind,

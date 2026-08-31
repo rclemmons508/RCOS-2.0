@@ -38,6 +38,7 @@ import com.example.data.WorkflowTemplate
 import com.example.ui.theme.AppThemeMode
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -84,7 +85,15 @@ enum class AppViewMode {
 
 class NovaViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val repository: NovaRepository
+    private val database = NovaDatabase.getDatabase(application)
+    private val repository = NovaRepository(
+        database.appDao(),
+        database.workflowDao(),
+        database.workspaceDao(),
+        database.auditLogDao(),
+        database.agentRegistryDao(),
+        database.workspaceOnboardingDao()
+    )
     private val secureManager = SecureCredentialManager(application)
     private val prefs = application.getSharedPreferences("rcos_user_prefs", Context.MODE_PRIVATE)
 
@@ -92,61 +101,24 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
     private val firestoreSyncManager = FirestoreTaskSyncManager(viewModelScope)
     val firestoreSyncInfo: StateFlow<FirestoreSyncInfo> = firestoreSyncManager.syncInfo
 
+    // Live Autonomous Agents retrieved from Firestore
+    private val _firestoreActiveAgents = MutableStateFlow<List<AgentRegistryEntity>>(emptyList())
+    val firestoreActiveAgents: StateFlow<List<AgentRegistryEntity>> = _firestoreActiveAgents.asStateFlow()
+
+    private val _isFetchingFirestoreAgents = MutableStateFlow(false)
+    val isFetchingFirestoreAgents: StateFlow<Boolean> = _isFetchingFirestoreAgents.asStateFlow()
+
     // App Theme Display Preference (Dark, Light, Follow System)
     private val _themeMode = MutableStateFlow(AppThemeMode.DARK_MODE)
     val themeMode: StateFlow<AppThemeMode> = _themeMode.asStateFlow()
-
-    fun setThemeMode(mode: AppThemeMode) {
-        _themeMode.value = mode
-        prefs.edit().putString("app_theme_mode", mode.name).apply()
-    }
 
     // OS View Mode Selector (Web Desktop vs Mobile vs Auto Detect)
     private val _viewMode = MutableStateFlow(AppViewMode.AUTO_DETECT)
     val viewMode: StateFlow<AppViewMode> = _viewMode.asStateFlow()
 
-    fun setViewMode(mode: AppViewMode) {
-        _viewMode.value = mode
-        prefs.edit().putString("app_view_mode", mode.name).apply()
-    }
-
     // Demo Mode vs Functioning Mode
     private val _isDemoMode = MutableStateFlow(prefs.getBoolean("app_demo_mode", false))
     val isDemoMode: StateFlow<Boolean> = _isDemoMode.asStateFlow()
-
-    fun setDemoMode(isDemo: Boolean) {
-        _isDemoMode.value = isDemo
-        prefs.edit().putBoolean("app_demo_mode", isDemo).apply()
-        if (isDemo) {
-            _clientsList.value = getInitialClients()
-            _phoneCallLogs.value = getInitialPhoneCalls()
-            _calendarEvents.value = getInitialCalendarEvents()
-            _jobTasks.value = getInitialJobEntities()
-            _integrations.value = getInitialIntegrations()
-            _statusNotice.value = "Demo Mode Enabled: Seed data restored."
-        } else {
-            wipeAllData()
-            _statusNotice.value = "Functioning Mode Enabled: All mock data wiped."
-        }
-    }
-
-    fun wipeAllData() {
-        _clientsList.value = emptyList()
-        _phoneCallLogs.value = emptyList()
-        _calendarEvents.value = emptyList()
-        _jobTasks.value = emptyList()
-        _integrations.value = emptyList()
-        _chatMessages.value = emptyList()
-        _selectedClientDetail.value = null
-        _statusNotice.value = "App wiped. Start from scratch."
-    }
-
-    fun clearSensitiveData() {
-        _phoneCallLogs.value = emptyList()
-        _chatMessages.value = emptyList()
-        _calendarEvents.value = emptyList()
-        _statusNotice.value = "Sensitive data cleared (Calls, Chats, Calendar)."
-    }
 
     // Clients Directory & Details Modal
     private val _clientsList = MutableStateFlow<List<ClientDetailData>>(if (prefs.getBoolean("app_demo_mode", false)) getInitialClients() else emptyList())
@@ -155,414 +127,43 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedClientDetail = MutableStateFlow<ClientDetailData?>(null)
     val selectedClientDetail: StateFlow<ClientDetailData?> = _selectedClientDetail.asStateFlow()
 
-    fun selectClientForDetails(client: ClientDetailData?) {
-        _selectedClientDetail.value = client
-    }
-
-    fun selectClientByName(clientName: String) {
-        val found = _clientsList.value.find { it.companyName.contains(clientName, ignoreCase = true) }
-            ?: _clientsList.value.firstOrNull()
-        _selectedClientDetail.value = found
-    }
-
-    fun addOrUpdateClient(client: ClientDetailData) {
-        val currentList = _clientsList.value.toMutableList()
-        val index = currentList.indexOfFirst { it.id == client.id }
-        if (index >= 0) {
-            currentList[index] = client
-        } else {
-            currentList.add(0, client)
-        }
-        _clientsList.value = currentList
-        if (_selectedClientDetail.value?.id == client.id) {
-            _selectedClientDetail.value = client
-        }
-        _statusNotice.value = "Client account '${client.companyName}' updated successfully."
-    }
-
-    fun deleteClient(clientId: String) {
-        _clientsList.value = _clientsList.value.filter { it.id != clientId }
-        if (_selectedClientDetail.value?.id == clientId) {
-            _selectedClientDetail.value = null
-        }
-        _statusNotice.value = "Client account removed."
-    }
-
     // Personal Executive Profile State & Tool Accounts
     private val _userProfile = MutableStateFlow(UserProfileData())
     val userProfile: StateFlow<UserProfileData> = _userProfile.asStateFlow()
-
-    fun updateUserProfile(profile: UserProfileData) {
-        _userProfile.value = profile
-        secureManager.saveString("profile_full_name", profile.fullName)
-        secureManager.saveString("profile_title", profile.executiveTitle)
-        secureManager.saveString("profile_email", profile.personalEmail)
-        secureManager.saveString("profile_phone", profile.phone)
-        secureManager.saveString("profile_google_email", profile.googleWorkspaceEmail)
-        secureManager.saveString("profile_ms_email", profile.microsoftAccountEmail)
-        secureManager.saveString("profile_org_name", profile.organizationName)
-        secureManager.saveString("profile_timezone", profile.timezone)
-
-        // Sync connected accounts across Google Workspace & Microsoft 365 integrations
-        _integrations.value = _integrations.value.map { app ->
-            when (app.category) {
-                "Google Workspace" -> app.copy(
-                    connectedAccount = profile.googleWorkspaceEmail.ifBlank { "rcsolutions@gmail.com" },
-                    isConnected = profile.googleWorkspaceEmail.isNotBlank(),
-                    lastSynced = if (profile.googleWorkspaceEmail.isNotBlank()) "Connected (Live Sync)" else "Disconnected"
-                )
-                "Microsoft 365" -> app.copy(
-                    connectedAccount = profile.microsoftAccountEmail.ifBlank { "executive@rcsolutions.onmicrosoft.com" },
-                    isConnected = profile.microsoftAccountEmail.isNotBlank(),
-                    lastSynced = if (profile.microsoftAccountEmail.isNotBlank()) "Connected (Live Sync)" else "Disconnected"
-                )
-                else -> app
-            }
-        }
-
-        // Sync logged-in user details if present
-        _currentUser.value?.let { curr ->
-            _currentUser.value = curr.copy(
-                fullName = profile.fullName,
-                email = profile.personalEmail,
-                companyName = profile.organizationName
-            )
-        }
-
-        _statusNotice.value = "Personal profile & connected tool accounts updated."
-    }
-
-    fun linkGoogleWorkspaceAccount(accountEmail: String) {
-        val updated = _userProfile.value.copy(googleWorkspaceEmail = accountEmail)
-        updateUserProfile(updated)
-        _statusNotice.value = "Google Workspace account linked ($accountEmail)."
-    }
-
-    fun linkMicrosoftAccount(accountEmail: String) {
-        val updated = _userProfile.value.copy(microsoftAccountEmail = accountEmail)
-        updateUserProfile(updated)
-        _statusNotice.value = "Microsoft 365 account linked ($accountEmail)."
-    }
 
     // Incoming Call Handover State (Human Representative vs AI Agent)
     private val _incomingCallState = MutableStateFlow(IncomingCallState())
     val incomingCallState: StateFlow<IncomingCallState> = _incomingCallState.asStateFlow()
 
-    fun triggerSimulatedIncomingCall(callerName: String = "Apex Enterprises", phone: String = "+1 (555) 234-8901") {
-        _incomingCallState.value = IncomingCallState(
-            callId = "call_" + (1000..9999).random(),
-            callerName = callerName,
-            callerPhone = phone,
-            isRinging = true,
-            isConnected = false,
-            handledBy = "None",
-            callNotes = "Incoming inquiry regarding active job dispatch and service status.",
-            liveTranscript = listOf("RCOS System: Incoming call ringing from $callerName ($phone)...")
-        )
-        _statusNotice.value = "Incoming call ringing from $callerName..."
-    }
-
-    fun handleCallManually() {
-        val current = _incomingCallState.value
-        _incomingCallState.value = current.copy(
-            isRinging = false,
-            isConnected = true,
-            handledBy = "Human Representative",
-            liveTranscript = current.liveTranscript + listOf(
-                "Human Rep: Hello! Thank you for calling ${current.callerName} RCOS hotline. How can I assist you today?",
-                "Caller: Hi, I'm calling to check up on our active onboarding pipeline and job status.",
-                "Human Rep: Absolutely, let me bring up your client account file right now."
-            )
-        )
-        _statusNotice.value = "Call connected to Human Representative."
-    }
-
-    fun handleCallWithAI() {
-        val current = _incomingCallState.value
-        _incomingCallState.value = current.copy(
-            isRinging = false,
-            isConnected = true,
-            handledBy = "AI Voice Agent",
-            liveTranscript = current.liveTranscript + listOf(
-                "RCOS AI Agent: Greetings! I am the automated executive assistant for RCOS. How may I route your inquiry?",
-                "Caller: Hi! We need to confirm tomorrow's strategic financial review and dispatch.",
-                "RCOS AI Agent: Confirmed! I have logged your request, scheduled the meeting in Google Calendar / Outlook, and updated your ongoing job #JOB-101."
-            )
-        )
-        _statusNotice.value = "Call handed over to RCOS AI Voice Agent!"
-    }
-
-    fun endActiveCall() {
-        val current = _incomingCallState.value
-        if (current.isConnected || current.isRinging) {
-            val callType = if (current.handledBy.contains("AI")) "AI Handled" else if (current.handledBy.contains("Human")) "Incoming" else "Incoming"
-            val transcriptSummary = if (current.liveTranscript.isNotEmpty()) {
-                current.liveTranscript.takeLast(2).joinToString(" ")
-            } else {
-                "Inquiry completed with ${current.handledBy}."
-            }
-            val newCall = PhoneCallItem(
-                id = "call_${System.currentTimeMillis() % 100000}",
-                callerName = current.callerName,
-                phoneNumber = current.callerPhone,
-                callType = callType,
-                duration = if (current.handledBy.contains("AI")) "3m 12s" else "1m 45s",
-                timeAgo = "Just now",
-                summary = transcriptSummary,
-                timestamp = System.currentTimeMillis()
-            )
-            _phoneCallLogs.value = listOf(newCall) + _phoneCallLogs.value
-
-            recordAuditEvent(
-                actionType = "PHONE_CALL_ENDED",
-                description = "Completed $callType call from ${current.callerName} (${newCall.duration})",
-                result = AuditResultStatus.SUCCESS
-            )
-
-            // If AI Handled, auto-create a CRM job ticket
-            if (callType == "AI Handled") {
-                dispatchJob(
-                    title = "AI Voice Hotline Follow-Up: ${current.callerName}",
-                    clientName = current.callerName,
-                    assignedAgent = "Voice Dispatcher Agent",
-                    priority = "High",
-                    dueDate = "Today, 4:00 PM",
-                    summary = "Automated follow-up dispatched by Voice Agent from hotline call."
-                )
-            }
-        }
-        _statusNotice.value = "Call ended (${current.handledBy}). Summary saved to Client CRM & Call Logs."
-        _incomingCallState.value = IncomingCallState(isRinging = false, isConnected = false, handledBy = "None")
-    }
-
     // Phone Call History & Logging
     private val _phoneCallLogs = MutableStateFlow<List<PhoneCallItem>>(if (prefs.getBoolean("app_demo_mode", false)) getInitialPhoneCalls() else emptyList())
     val phoneCallLogs: StateFlow<List<PhoneCallItem>> = _phoneCallLogs.asStateFlow()
-
-    fun logPhoneCall(
-        callerName: String,
-        phoneNumber: String,
-        callType: String = "Incoming",
-        duration: String = "2m 15s",
-        summary: String = "Call logged by user.",
-        autoCreateJob: Boolean = false,
-        jobTitle: String = ""
-    ) {
-        val newCall = PhoneCallItem(
-            id = "call_${System.currentTimeMillis() % 100000}",
-            callerName = callerName.ifBlank { "Client Caller" },
-            phoneNumber = phoneNumber.ifBlank { "+1 (555) 000-0000" },
-            callType = callType,
-            duration = duration.ifBlank { "1m 30s" },
-            timeAgo = "Just now",
-            summary = summary.ifBlank { "Inbound inquiry recorded and filed to client history." },
-            timestamp = System.currentTimeMillis()
-        )
-        _phoneCallLogs.value = listOf(newCall) + _phoneCallLogs.value
-        _statusNotice.value = "Call record logged for ${newCall.callerName}."
-
-        recordAuditEvent(
-            actionType = "PHONE_CALL_LOGGED",
-            description = "Logged $callType call for ${newCall.callerName} ($duration)",
-            result = AuditResultStatus.SUCCESS
-        )
-
-        if (autoCreateJob) {
-            val taskTitle = if (jobTitle.isNotBlank()) jobTitle else "Follow-up for ${newCall.callerName} ($callType Call)"
-            dispatchJob(
-                title = taskTitle,
-                clientName = newCall.callerName,
-                assignedAgent = if (callType == "AI Handled") "Voice Dispatcher Agent" else "Onboarding Specialist Agent",
-                priority = "High",
-                dueDate = "Today, 5:00 PM",
-                summary = "Call follow-up task: ${newCall.summary}"
-            )
-        }
-    }
-
-    fun deletePhoneCall(callId: String) {
-        _phoneCallLogs.value = _phoneCallLogs.value.filter { it.id != callId }
-        _statusNotice.value = "Call record removed."
-    }
 
     // Dynamic Calendar & Schedule State
     private val _calendarEvents = MutableStateFlow<List<CalendarEventItem>>(if (prefs.getBoolean("app_demo_mode", false)) getInitialCalendarEvents() else emptyList())
     val calendarEvents: StateFlow<List<CalendarEventItem>> = _calendarEvents.asStateFlow()
 
-    fun addCalendarEvent(event: CalendarEventItem) {
-        _calendarEvents.value = listOf(event) + _calendarEvents.value
-        _statusNotice.value = "Scheduled '${event.title}' on ${event.date} at ${event.time}."
-        recordAuditEvent(
-            actionType = "CALENDAR_EVENT_CREATED",
-            description = "Scheduled event '${event.title}' for ${event.clientName}",
-            result = AuditResultStatus.SUCCESS
-        )
-    }
-
-    fun updateCalendarEvent(event: CalendarEventItem) {
-        _calendarEvents.value = _calendarEvents.value.map {
-            if (it.id == event.id) event else it
-        }
-        _statusNotice.value = "Calendar event '${event.title}' updated."
-        recordAuditEvent(
-            actionType = "CALENDAR_EVENT_UPDATED",
-            description = "Updated event '${event.title}' for ${event.clientName}",
-            result = AuditResultStatus.SUCCESS
-        )
-    }
-
-    fun deleteCalendarEvent(eventId: String) {
-        _calendarEvents.value = _calendarEvents.value.filter { it.id != eventId }
-        _statusNotice.value = "Calendar event removed."
-    }
-
-    fun toggleCalendarEventStatus(eventId: String) {
-        _calendarEvents.value = _calendarEvents.value.map {
-            if (it.id == eventId) {
-                val newStatus = if (it.status == "Completed") "Scheduled" else "Completed"
-                it.copy(status = newStatus)
-            } else it
-        }
-        _statusNotice.value = "Event status updated."
-    }
-
-    fun syncCalendarWithGoogleWorkspace() {
-        _statusNotice.value = "Synced ${_calendarEvents.value.size} events with Google Calendar & Outlook 365."
-        recordAuditEvent(
-            actionType = "CALENDAR_SYNC",
-            description = "Synced calendar events across Google Workspace and Microsoft 365",
-            result = AuditResultStatus.SUCCESS
-        )
-    }
-
     // Connected External Applications & AI Agent Permissions
     private val _integrations = MutableStateFlow<List<AppIntegration>>(if (prefs.getBoolean("app_demo_mode", false)) getInitialIntegrations() else emptyList())
     val integrations: StateFlow<List<AppIntegration>> = _integrations.asStateFlow()
 
-    fun toggleIntegrationConnection(appId: String, isConnected: Boolean) {
-        _integrations.value = _integrations.value.map { app ->
-            if (app.id == appId) {
-                app.copy(
-                    isConnected = isConnected,
-                    lastSynced = if (isConnected) "Connected (Live Sync)" else "Disconnected"
-                )
-            } else app
-        }
-        val appName = _integrations.value.find { it.id == appId }?.name ?: "App"
-        _statusNotice.value = if (isConnected) "$appName connected & synced!" else "$appName disconnected."
-    }
+    // Job / Task Management State
+    private val _jobTasks = MutableStateFlow<List<JobEntity>>(if (prefs.getBoolean("app_demo_mode", false)) getInitialJobEntities() else emptyList())
+    val jobTasks: StateFlow<List<JobEntity>> = _jobTasks.asStateFlow()
 
-    fun toggleIntegrationPermission(appId: String, permissionId: String, isEnabled: Boolean) {
-        _integrations.value = _integrations.value.map { app ->
-            if (app.id == appId) {
-                val updatedPermissions = app.permissions.map { perm ->
-                    if (perm.id == permissionId) perm.copy(isEnabled = isEnabled) else perm
-                }
-                app.copy(permissions = updatedPermissions)
-            } else app
-        }
-    }
+    val pendingJobs: StateFlow<List<JobEntity>> = _jobTasks
+        .map { list -> list.filter { it.status == "Pending" || it.status == "In Progress" || it.status == "Queued" } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    fun addCustomIntegration(name: String, category: String, description: String, account: String) {
-        val newApp = AppIntegration(
-            id = "custom_" + UUID.randomUUID().toString().take(6),
-            name = name,
-            category = if (category.isBlank()) "Enterprise Integration" else category,
-            description = if (description.isBlank()) "Connected custom corporate application." else description,
-            iconName = "custom",
-            isConnected = true,
-            connectedAccount = if (account.isBlank()) "executive@rcos.ai" else account,
-            permissions = listOf(
-                AgentPermission("read", "Read Data & Logs", "Allows AI Agent to query records", true),
-                AgentPermission("write", "Execute Actions", "Allows AI Agent to run automated tasks", true)
-            ),
-            lastSynced = "Connected Just Now"
-        )
-        _integrations.value = _integrations.value + newApp
-        _statusNotice.value = "$name integrated successfully!"
-    }
+    val completedJobs: StateFlow<List<JobEntity>> = _jobTasks
+        .map { list -> list.filter { it.status == "Completed" } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    init {
-        val database = NovaDatabase.getDatabase(application)
-        repository = NovaRepository(
-            database.appDao(),
-            database.workflowDao(),
-            database.workspaceDao(),
-            database.auditLogDao(),
-            database.agentRegistryDao(),
-            database.workspaceOnboardingDao()
-        )
+    val archivedJobs: StateFlow<List<JobEntity>> = _jobTasks
+        .map { list -> list.filter { it.status == "Archived" } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-        viewModelScope.launch {
-            repository.ensureWorkspaceDataSeeded()
-            repository.ensureWorkflowDataSeeded(
-                getInitialWorkflowTemplates(),
-                getInitialApprovalItems(),
-                getInitialAiActionLogs(),
-                getInitialAgentResponsibilities()
-            )
-
-            // Start Real-Time Firestore Synchronization for multi-device collaboration
-            firestoreSyncManager.startRealtimeTasksListener { remoteJobs ->
-                if (remoteJobs.isNotEmpty()) {
-                    val currentMap = _jobTasks.value.associateBy { it.id }.toMutableMap()
-                    remoteJobs.forEach { remote ->
-                        currentMap[remote.id] = remote
-                    }
-                    _jobTasks.value = currentMap.values.toList()
-                }
-            }
-
-            firestoreSyncManager.startRealtimeApprovalsListener { remoteApprovals ->
-                if (remoteApprovals.isNotEmpty()) {
-                    viewModelScope.launch {
-                        remoteApprovals.forEach { remoteItem ->
-                            repository.updateApprovalStatus(
-                                remoteItem.id,
-                                remoteItem.status,
-                                remoteItem.reviewedBy,
-                                remoteItem.reviewNotes
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Seed initial task baseline to cloud for multi-device sync
-            firestoreSyncManager.seedTasksToFirestore(_jobTasks.value)
-            firestoreSyncManager.seedApprovalsToFirestore(getInitialApprovalItems())
-        }
-
-        val savedMode = prefs.getString("app_view_mode", AppViewMode.AUTO_DETECT.name)
-        runCatching {
-            _viewMode.value = AppViewMode.valueOf(savedMode ?: AppViewMode.AUTO_DETECT.name)
-        }
-        val savedTheme = prefs.getString("app_theme_mode", AppThemeMode.DARK_MODE.name)
-        runCatching {
-            _themeMode.value = AppThemeMode.valueOf(savedTheme ?: AppThemeMode.DARK_MODE.name)
-        }
-
-        val savedName = secureManager.getString("profile_full_name", "RCS Executive User") ?: "RCS Executive User"
-        val savedTitle = secureManager.getString("profile_title", "Chief Executive Officer") ?: "Chief Executive Officer"
-        val savedEmail = secureManager.getString("profile_email", "rcsolutions@gmail.com") ?: "rcsolutions@gmail.com"
-        val savedPhone = secureManager.getString("profile_phone", "+1 (555) 100-2000") ?: "+1 (555) 100-2000"
-        val savedGoogleEmail = secureManager.getString("profile_google_email", "rcsolutions@gmail.com") ?: "rcsolutions@gmail.com"
-        val savedMsEmail = secureManager.getString("profile_ms_email", "executive@rcsolutions.onmicrosoft.com") ?: "executive@rcsolutions.onmicrosoft.com"
-        val savedOrg = secureManager.getString("profile_org_name", "RCOS Global Solutions") ?: "RCOS Global Solutions"
-        val savedTz = secureManager.getString("profile_timezone", "EST - Eastern Time (US & Canada)") ?: "EST - Eastern Time (US & Canada)"
-
-        _userProfile.value = UserProfileData(
-            fullName = savedName,
-            executiveTitle = savedTitle,
-            personalEmail = savedEmail,
-            phone = savedPhone,
-            googleWorkspaceEmail = savedGoogleEmail,
-            microsoftAccountEmail = savedMsEmail,
-            organizationName = savedOrg,
-            timezone = savedTz
-        )
-    }
-
+    // Database Flows
     val dashboardItems: StateFlow<List<DashboardItem>> = repository.allDashboardItems
         .stateIn(
             scope = viewModelScope,
@@ -670,7 +271,189 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusNotice = MutableStateFlow<String?>(null)
     val statusNotice: StateFlow<String?> = _statusNotice.asStateFlow()
 
+    // Android Keystore Encrypted Executive Vault
+    private val _vaultItems = MutableStateFlow<List<VaultItem>>(emptyList())
+    val vaultItems: StateFlow<List<VaultItem>> = _vaultItems.asStateFlow()
+
+    private val _isVaultUnlocked = MutableStateFlow(false)
+    val isVaultUnlocked: StateFlow<Boolean> = _isVaultUnlocked.asStateFlow()
+
+    // Multi-tenant Workspace & Governance State
+    private val _activeWorkspaceId = MutableStateFlow("ws_default")
+    val activeWorkspaceId: StateFlow<String> = _activeWorkspaceId.asStateFlow()
+
+    val allWorkspaces: StateFlow<List<WorkspaceEntity>> = repository.allWorkspaces
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val activeWorkspaceUserAccounts: StateFlow<List<UserAccount>> = _activeWorkspaceId
+        .flatMapLatest { id -> repository.getUserAccountsByWorkspace(id) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val activeBusinessAiConfig: StateFlow<BusinessAiConfig> = _activeWorkspaceId
+        .flatMapLatest { id -> repository.getBusinessAiConfig(id) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BusinessAiConfig())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val activeWorkspaceAuditLogs: StateFlow<List<AuditLogEntity>> = _activeWorkspaceId
+        .flatMapLatest { id -> repository.getWorkspaceAuditEvents(id) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val activeWorkspaceAgents: StateFlow<List<AgentRegistryEntity>> = _activeWorkspaceId
+        .flatMapLatest { id -> repository.getWorkspaceAgents(id) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val activeWorkspaceOnboarding: StateFlow<WorkspaceOnboardingEntity?> = _activeWorkspaceId
+        .flatMapLatest { id -> repository.getWorkspaceOnboarding(id) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    private val _selectedUserAccount = MutableStateFlow<UserAccount?>(null)
+    val selectedUserAccount: StateFlow<UserAccount?> = _selectedUserAccount.asStateFlow()
+
+    // AI Workflow Automation Engine State
+    val businessWorkflowConfig: StateFlow<BusinessWorkflowConfig> = repository.businessWorkflowConfig
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BusinessWorkflowConfig())
+
+    val workflowTemplates: StateFlow<List<WorkflowTemplate>> = repository.workflowTemplates
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val approvalItems: StateFlow<List<ApprovalItem>> = repository.approvalItems
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val pendingApprovalItems: StateFlow<List<ApprovalItem>> = approvalItems
+        .map { list -> list.filter { it.status == ApprovalStatus.PENDING } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val completedApprovalItems: StateFlow<List<ApprovalItem>> = approvalItems
+        .map { list -> list.filter { it.status == ApprovalStatus.APPROVED || it.status == ApprovalStatus.COMPLETED } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val archivedApprovalItems: StateFlow<List<ApprovalItem>> = approvalItems
+        .map { list -> list.filter { it.status == ApprovalStatus.ARCHIVED || it.status == ApprovalStatus.REJECTED } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val aiActionLogs: StateFlow<List<AiActionLog>> = repository.aiActionLogs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val agentResponsibilities: StateFlow<List<AgentResponsibility>> = repository.agentResponsibilities
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     init {
+        // Restore view preferences
+        val savedMode = prefs.getString("app_view_mode", AppViewMode.AUTO_DETECT.name)
+        runCatching {
+            _viewMode.value = AppViewMode.valueOf(savedMode ?: AppViewMode.AUTO_DETECT.name)
+        }
+        val savedTheme = prefs.getString("app_theme_mode", AppThemeMode.DARK_MODE.name)
+        runCatching {
+            _themeMode.value = AppThemeMode.valueOf(savedTheme ?: AppThemeMode.DARK_MODE.name)
+        }
+
+        // Load profile from secure storage
+        val savedName = secureManager.getString("profile_full_name", "RCS Executive User")
+        val savedTitle = secureManager.getString("profile_title", "Chief Executive Officer")
+        val savedEmail = secureManager.getString("profile_email", "rcsolutions@gmail.com")
+        val savedPhone = secureManager.getString("profile_phone", "+1 (555) 100-2000")
+        val savedGoogleEmail = secureManager.getString("profile_google_email", "rcsolutions@gmail.com")
+        val savedMsEmail = secureManager.getString("profile_ms_email", "executive@rcsolutions.onmicrosoft.com")
+        val savedOrg = secureManager.getString("profile_org_name", "RCOS Global Solutions")
+        val savedTz = secureManager.getString("profile_timezone", "EST - Eastern Time (US & Canada)")
+
+        _userProfile.value = UserProfileData(
+            fullName = savedName.ifBlank { "RCS Executive User" },
+            executiveTitle = savedTitle.ifBlank { "Chief Executive Officer" },
+            personalEmail = savedEmail.ifBlank { "rcsolutions@gmail.com" },
+            phone = savedPhone.ifBlank { "+1 (555) 100-2000" },
+            googleWorkspaceEmail = savedGoogleEmail.ifBlank { "rcsolutions@gmail.com" },
+            microsoftAccountEmail = savedMsEmail.ifBlank { "executive@rcsolutions.onmicrosoft.com" },
+            organizationName = savedOrg.ifBlank { "RCOS Global Solutions" },
+            timezone = savedTz.ifBlank { "EST - Eastern Time (US & Canada)" }
+        )
+
+        // Seed initial room data asynchronously
+        viewModelScope.launch {
+            try {
+                repository.ensureWorkspaceDataSeeded()
+                repository.ensureWorkflowDataSeeded(
+                    getInitialWorkflowTemplates(),
+                    getInitialApprovalItems(),
+                    getInitialAiActionLogs(),
+                    getInitialAgentResponsibilities()
+                )
+            } catch (t: Throwable) {
+                android.util.Log.w("NovaViewModel", "Database initial seeding notice: ${t.message}")
+            }
+
+            try {
+                // Start Real-Time Firestore Synchronization for multi-device collaboration
+                firestoreSyncManager.startRealtimeTasksListener { remoteJobs ->
+                    if (remoteJobs.isNotEmpty()) {
+                        val currentMap = _jobTasks.value.associateBy { it.id }.toMutableMap()
+                        remoteJobs.forEach { remote ->
+                            currentMap[remote.id] = remote
+                        }
+                        _jobTasks.value = currentMap.values.toList()
+                    }
+                }
+
+                firestoreSyncManager.startRealtimeApprovalsListener { remoteApprovals ->
+                    if (remoteApprovals.isNotEmpty()) {
+                        viewModelScope.launch {
+                            try {
+                                remoteApprovals.forEach { remoteItem ->
+                                    repository.updateApprovalStatus(
+                                        remoteItem.id,
+                                        remoteItem.status,
+                                        remoteItem.reviewedBy,
+                                        remoteItem.reviewNotes
+                                    )
+                                }
+                            } catch (t: Throwable) {
+                                android.util.Log.w("NovaViewModel", "Approval update notice: ${t.message}")
+                            }
+                        }
+                    }
+                }
+
+                // Start Real-Time Firestore Autonomous Agents Synchronization
+                firestoreSyncManager.startRealtimeAgentsListener { remoteAgents ->
+                    if (remoteAgents.isNotEmpty()) {
+                        val activeOnly = remoteAgents.filter { it.status.equals(AgentStatus.ACTIVE.name, ignoreCase = true) }
+                        _firestoreActiveAgents.value = activeOnly
+                        viewModelScope.launch {
+                            remoteAgents.forEach { agent ->
+                                try {
+                                    repository.insertAgent(agent)
+                                } catch (_: Throwable) {}
+                            }
+                        }
+                    }
+                }
+
+                // Seed initial task & agents baseline to cloud for multi-device sync
+                firestoreSyncManager.seedTasksToFirestore(_jobTasks.value)
+                firestoreSyncManager.seedApprovalsToFirestore(getInitialApprovalItems())
+                
+                // Fetch/seed initial active agents from repository to Firestore
+                viewModelScope.launch {
+                    try {
+                        val localAgents = repository.getActiveWorkspaceAgents("ws_default").firstOrNull() ?: emptyList()
+                        if (localAgents.isNotEmpty()) {
+                            if (_firestoreActiveAgents.value.isEmpty()) {
+                                _firestoreActiveAgents.value = localAgents
+                            }
+                            firestoreSyncManager.seedAgentsToFirestore(localAgents)
+                        }
+                    } catch (_: Throwable) {}
+                }
+            } catch (t: Throwable) {
+                android.util.Log.w("NovaViewModel", "Firestore sync startup notice: ${t.message}")
+            }
+        }
+
         // Observe current session messages
         viewModelScope.launch {
             _currentSessionId.collect { sessionId ->
@@ -682,6 +465,357 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
 
         // Auto restore user session
         restoreSession()
+    }
+
+    fun setThemeMode(mode: AppThemeMode) {
+        _themeMode.value = mode
+        prefs.edit().putString("app_theme_mode", mode.name).apply()
+    }
+
+    fun setViewMode(mode: AppViewMode) {
+        _viewMode.value = mode
+        prefs.edit().putString("app_view_mode", mode.name).apply()
+    }
+
+    fun setDemoMode(isDemo: Boolean) {
+        _isDemoMode.value = isDemo
+        prefs.edit().putBoolean("app_demo_mode", isDemo).apply()
+        if (isDemo) {
+            _clientsList.value = getInitialClients()
+            _phoneCallLogs.value = getInitialPhoneCalls()
+            _calendarEvents.value = getInitialCalendarEvents()
+            _jobTasks.value = getInitialJobEntities()
+            _integrations.value = getInitialIntegrations()
+            _statusNotice.value = "Demo Mode Enabled: Seed data restored."
+        } else {
+            wipeAllData()
+            _statusNotice.value = "Functioning Mode Enabled: All mock data wiped."
+        }
+    }
+
+    fun wipeAllData() {
+        _clientsList.value = emptyList()
+        _phoneCallLogs.value = emptyList()
+        _calendarEvents.value = emptyList()
+        _jobTasks.value = emptyList()
+        _integrations.value = emptyList()
+        _chatMessages.value = emptyList()
+        _selectedClientDetail.value = null
+        _statusNotice.value = "App wiped. Start from scratch."
+    }
+
+    fun clearSensitiveData() {
+        _phoneCallLogs.value = emptyList()
+        _chatMessages.value = emptyList()
+        _calendarEvents.value = emptyList()
+        _statusNotice.value = "Sensitive data cleared (Calls, Chats, Calendar)."
+    }
+
+    fun selectClientForDetails(client: ClientDetailData?) {
+        _selectedClientDetail.value = client
+    }
+
+    fun selectClientByName(clientName: String) {
+        val found = _clientsList.value.find { it.companyName.contains(clientName, ignoreCase = true) }
+            ?: _clientsList.value.firstOrNull()
+        _selectedClientDetail.value = found
+    }
+
+    fun addOrUpdateClient(client: ClientDetailData) {
+        val currentList = _clientsList.value.toMutableList()
+        val index = currentList.indexOfFirst { it.id == client.id }
+        if (index >= 0) {
+            currentList[index] = client
+        } else {
+            currentList.add(0, client)
+        }
+        _clientsList.value = currentList
+        if (_selectedClientDetail.value?.id == client.id) {
+            _selectedClientDetail.value = client
+        }
+        _statusNotice.value = "Client account '${client.companyName}' updated successfully."
+    }
+
+    fun deleteClient(clientId: String) {
+        _clientsList.value = _clientsList.value.filter { it.id != clientId }
+        if (_selectedClientDetail.value?.id == clientId) {
+            _selectedClientDetail.value = null
+        }
+        _statusNotice.value = "Client account removed."
+    }
+
+    fun updateUserProfile(profile: UserProfileData) {
+        _userProfile.value = profile
+        secureManager.saveString("profile_full_name", profile.fullName)
+        secureManager.saveString("profile_title", profile.executiveTitle)
+        secureManager.saveString("profile_email", profile.personalEmail)
+        secureManager.saveString("profile_phone", profile.phone)
+        secureManager.saveString("profile_google_email", profile.googleWorkspaceEmail)
+        secureManager.saveString("profile_ms_email", profile.microsoftAccountEmail)
+        secureManager.saveString("profile_org_name", profile.organizationName)
+        secureManager.saveString("profile_timezone", profile.timezone)
+
+        // Sync connected accounts across Google Workspace & Microsoft 365 integrations
+        _integrations.value = _integrations.value.map { app ->
+            when (app.category) {
+                "Google Workspace" -> app.copy(
+                    connectedAccount = profile.googleWorkspaceEmail.ifBlank { "rcsolutions@gmail.com" },
+                    isConnected = profile.googleWorkspaceEmail.isNotBlank(),
+                    lastSynced = if (profile.googleWorkspaceEmail.isNotBlank()) "Connected (Live Sync)" else "Disconnected"
+                )
+                "Microsoft 365" -> app.copy(
+                    connectedAccount = profile.microsoftAccountEmail.ifBlank { "executive@rcsolutions.onmicrosoft.com" },
+                    isConnected = profile.microsoftAccountEmail.isNotBlank(),
+                    lastSynced = if (profile.microsoftAccountEmail.isNotBlank()) "Connected (Live Sync)" else "Disconnected"
+                )
+                else -> app
+            }
+        }
+
+        // Sync logged-in user details if present
+        _currentUser.value?.let { curr ->
+            _currentUser.value = curr.copy(
+                fullName = profile.fullName,
+                email = profile.personalEmail,
+                companyName = profile.organizationName
+            )
+        }
+
+        _statusNotice.value = "Personal profile & connected tool accounts updated."
+    }
+
+    fun linkGoogleWorkspaceAccount(accountEmail: String) {
+        val updated = _userProfile.value.copy(googleWorkspaceEmail = accountEmail)
+        updateUserProfile(updated)
+        _statusNotice.value = "Google Workspace account linked ($accountEmail)."
+    }
+
+    fun linkMicrosoftAccount(accountEmail: String) {
+        val updated = _userProfile.value.copy(microsoftAccountEmail = accountEmail)
+        updateUserProfile(updated)
+        _statusNotice.value = "Microsoft 365 account linked ($accountEmail)."
+    }
+
+    fun triggerSimulatedIncomingCall(callerName: String = "Apex Enterprises", phone: String = "+1 (555) 234-8901") {
+        _incomingCallState.value = IncomingCallState(
+            callId = "call_" + (1000..9999).random(),
+            callerName = callerName,
+            callerPhone = phone,
+            isRinging = true,
+            isConnected = false,
+            handledBy = "None",
+            callNotes = "Incoming inquiry regarding active job dispatch and service status.",
+            liveTranscript = listOf("RCOS System: Incoming call ringing from $callerName ($phone)...")
+        )
+        _statusNotice.value = "Incoming call ringing from $callerName..."
+    }
+
+    fun handleCallManually() {
+        val current = _incomingCallState.value
+        _incomingCallState.value = current.copy(
+            isRinging = false,
+            isConnected = true,
+            handledBy = "Human Representative",
+            liveTranscript = current.liveTranscript + listOf(
+                "Human Rep: Hello! Thank you for calling ${current.callerName} RCOS hotline. How can I assist you today?",
+                "Caller: Hi, I'm calling to check up on our active onboarding pipeline and job status.",
+                "Human Rep: Absolutely, let me bring up your client account file right now."
+            )
+        )
+        _statusNotice.value = "Call connected to Human Representative."
+    }
+
+    fun handleCallWithAI() {
+        val current = _incomingCallState.value
+        _incomingCallState.value = current.copy(
+            isRinging = false,
+            isConnected = true,
+            handledBy = "AI Voice Agent",
+            liveTranscript = current.liveTranscript + listOf(
+                "RCOS AI Agent: Greetings! I am the automated executive assistant for RCOS. How may I route your inquiry?",
+                "Caller: Hi! We need to confirm tomorrow's strategic financial review and dispatch.",
+                "RCOS AI Agent: Confirmed! I have logged your request, scheduled the meeting in Google Calendar / Outlook, and updated your ongoing job #JOB-101."
+            )
+        )
+        _statusNotice.value = "Call handed over to RCOS AI Voice Agent!"
+    }
+
+    fun endActiveCall() {
+        val current = _incomingCallState.value
+        if (current.isConnected || current.isRinging) {
+            val callType = if (current.handledBy.contains("AI")) "AI Handled" else if (current.handledBy.contains("Human")) "Incoming" else "Incoming"
+            val transcriptSummary = if (current.liveTranscript.isNotEmpty()) {
+                current.liveTranscript.takeLast(2).joinToString(" ")
+            } else {
+                "Inquiry completed with ${current.handledBy}."
+            }
+            val newCall = PhoneCallItem(
+                id = "call_${System.currentTimeMillis() % 100000}",
+                callerName = current.callerName,
+                phoneNumber = current.callerPhone,
+                callType = callType,
+                duration = if (current.handledBy.contains("AI")) "3m 12s" else "1m 45s",
+                timeAgo = "Just now",
+                summary = transcriptSummary,
+                timestamp = System.currentTimeMillis()
+            )
+            _phoneCallLogs.value = listOf(newCall) + _phoneCallLogs.value
+
+            recordAuditEvent(
+                actionType = "PHONE_CALL_ENDED",
+                description = "Completed $callType call from ${current.callerName} (${newCall.duration})",
+                result = AuditResultStatus.SUCCESS
+            )
+
+            // If AI Handled, auto-create a CRM job ticket
+            if (callType == "AI Handled") {
+                dispatchJob(
+                    title = "AI Voice Hotline Follow-Up: ${current.callerName}",
+                    clientName = current.callerName,
+                    assignedAgent = "Voice Dispatcher Agent",
+                    priority = "High",
+                    dueDate = "Today, 4:00 PM",
+                    summary = "Automated follow-up dispatched by Voice Agent from hotline call."
+                )
+            }
+        }
+        _statusNotice.value = "Call ended (${current.handledBy}). Summary saved to Client CRM & Call Logs."
+        _incomingCallState.value = IncomingCallState(isRinging = false, isConnected = false, handledBy = "None")
+    }
+
+    fun logPhoneCall(
+        callerName: String,
+        phoneNumber: String,
+        callType: String = "Incoming",
+        duration: String = "2m 15s",
+        summary: String = "Call logged by user.",
+        autoCreateJob: Boolean = false,
+        jobTitle: String = ""
+    ) {
+        val newCall = PhoneCallItem(
+            id = "call_${System.currentTimeMillis() % 100000}",
+            callerName = callerName.ifBlank { "Client Caller" },
+            phoneNumber = phoneNumber.ifBlank { "+1 (555) 000-0000" },
+            callType = callType,
+            duration = duration.ifBlank { "1m 30s" },
+            timeAgo = "Just now",
+            summary = summary.ifBlank { "Inbound inquiry recorded and filed to client history." },
+            timestamp = System.currentTimeMillis()
+        )
+        _phoneCallLogs.value = listOf(newCall) + _phoneCallLogs.value
+        _statusNotice.value = "Call record logged for ${newCall.callerName}."
+
+        recordAuditEvent(
+            actionType = "PHONE_CALL_LOGGED",
+            description = "Logged $callType call for ${newCall.callerName} ($duration)",
+            result = AuditResultStatus.SUCCESS
+        )
+
+        if (autoCreateJob) {
+            val taskTitle = if (jobTitle.isNotBlank()) jobTitle else "Follow-up for ${newCall.callerName} ($callType Call)"
+            dispatchJob(
+                title = taskTitle,
+                clientName = newCall.callerName,
+                assignedAgent = if (callType == "AI Handled") "Voice Dispatcher Agent" else "Onboarding Specialist Agent",
+                priority = "High",
+                dueDate = "Today, 5:00 PM",
+                summary = "Call follow-up task: ${newCall.summary}"
+            )
+        }
+    }
+
+    fun deletePhoneCall(callId: String) {
+        _phoneCallLogs.value = _phoneCallLogs.value.filter { it.id != callId }
+        _statusNotice.value = "Call record removed."
+    }
+
+    fun addCalendarEvent(event: CalendarEventItem) {
+        _calendarEvents.value = listOf(event) + _calendarEvents.value
+        _statusNotice.value = "Scheduled '${event.title}' on ${event.date} at ${event.time}."
+        recordAuditEvent(
+            actionType = "CALENDAR_EVENT_CREATED",
+            description = "Scheduled event '${event.title}' for ${event.clientName}",
+            result = AuditResultStatus.SUCCESS
+        )
+    }
+
+    fun updateCalendarEvent(event: CalendarEventItem) {
+        _calendarEvents.value = _calendarEvents.value.map {
+            if (it.id == event.id) event else it
+        }
+        _statusNotice.value = "Calendar event '${event.title}' updated."
+        recordAuditEvent(
+            actionType = "CALENDAR_EVENT_UPDATED",
+            description = "Updated event '${event.title}' for ${event.clientName}",
+            result = AuditResultStatus.SUCCESS
+        )
+    }
+
+    fun deleteCalendarEvent(eventId: String) {
+        _calendarEvents.value = _calendarEvents.value.filter { it.id != eventId }
+        _statusNotice.value = "Calendar event removed."
+    }
+
+    fun toggleCalendarEventStatus(eventId: String) {
+        _calendarEvents.value = _calendarEvents.value.map {
+            if (it.id == eventId) {
+                val newStatus = if (it.status == "Completed") "Scheduled" else "Completed"
+                it.copy(status = newStatus)
+            } else it
+        }
+        _statusNotice.value = "Event status updated."
+    }
+
+    fun syncCalendarWithGoogleWorkspace() {
+        _statusNotice.value = "Synced ${_calendarEvents.value.size} events with Google Calendar & Outlook 365."
+        recordAuditEvent(
+            actionType = "CALENDAR_SYNC",
+            description = "Synced calendar events across Google Workspace and Microsoft 365",
+            result = AuditResultStatus.SUCCESS
+        )
+    }
+
+    fun toggleIntegrationConnection(appId: String, isConnected: Boolean) {
+        _integrations.value = _integrations.value.map { app ->
+            if (app.id == appId) {
+                app.copy(
+                    isConnected = isConnected,
+                    lastSynced = if (isConnected) "Connected (Live Sync)" else "Disconnected"
+                )
+            } else app
+        }
+        val appName = _integrations.value.find { it.id == appId }?.name ?: "App"
+        _statusNotice.value = if (isConnected) "$appName connected & synced!" else "$appName disconnected."
+    }
+
+    fun toggleIntegrationPermission(appId: String, permissionId: String, isEnabled: Boolean) {
+        _integrations.value = _integrations.value.map { app ->
+            if (app.id == appId) {
+                val updatedPermissions = app.permissions.map { perm ->
+                    if (perm.id == permissionId) perm.copy(isEnabled = isEnabled) else perm
+                }
+                app.copy(permissions = updatedPermissions)
+            } else app
+        }
+    }
+
+    fun addCustomIntegration(name: String, category: String, description: String, account: String) {
+        val newApp = AppIntegration(
+            id = "custom_" + UUID.randomUUID().toString().take(6),
+            name = name,
+            category = if (category.isBlank()) "Enterprise Integration" else category,
+            description = if (description.isBlank()) "Connected custom corporate application." else description,
+            iconName = "custom",
+            isConnected = true,
+            connectedAccount = if (account.isBlank()) "executive@rcos.ai" else account,
+            permissions = listOf(
+                AgentPermission("read", "Read Data & Logs", "Allows AI Agent to query records", true),
+                AgentPermission("write", "Execute Actions", "Allows AI Agent to run automated tasks", true)
+            ),
+            lastSynced = "Connected Just Now"
+        )
+        _integrations.value = _integrations.value + newApp
+        _statusNotice.value = "$name integrated successfully!"
     }
 
     private fun restoreSession() {
@@ -866,13 +1000,7 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
         _statusNotice.value = "Logged out from RCOS Multi-Agent System."
     }
 
-    // Android Keystore Encrypted Executive Vault
-    private val _vaultItems = MutableStateFlow<List<VaultItem>>(emptyList())
-    val vaultItems: StateFlow<List<VaultItem>> = _vaultItems.asStateFlow()
-
-    private val _isVaultUnlocked = MutableStateFlow(false)
-    val isVaultUnlocked: StateFlow<Boolean> = _isVaultUnlocked.asStateFlow()
-
+    // Android Keystore Encrypted Executive Vault Actions
     fun unlockVault() {
         _isVaultUnlocked.value = true
         refreshVaultItems()
@@ -899,44 +1027,7 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
         _statusNotice.value = "Credential removed from Keystore Vault."
     }
 
-    // ==========================================
-    // MULTI-TENANT WORKSPACE & GOVERNANCE STATE
-    // ==========================================
-
-    private val _activeWorkspaceId = MutableStateFlow("ws_default")
-    val activeWorkspaceId: StateFlow<String> = _activeWorkspaceId.asStateFlow()
-
-    val allWorkspaces: StateFlow<List<WorkspaceEntity>> = repository.allWorkspaces
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val activeWorkspaceUserAccounts: StateFlow<List<UserAccount>> = _activeWorkspaceId
-        .flatMapLatest { id -> repository.getUserAccountsByWorkspace(id) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val activeBusinessAiConfig: StateFlow<BusinessAiConfig> = _activeWorkspaceId
-        .flatMapLatest { id -> repository.getBusinessAiConfig(id) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BusinessAiConfig())
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val activeWorkspaceAuditLogs: StateFlow<List<AuditLogEntity>> = _activeWorkspaceId
-        .flatMapLatest { id -> repository.getWorkspaceAuditEvents(id) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val activeWorkspaceAgents: StateFlow<List<AgentRegistryEntity>> = _activeWorkspaceId
-        .flatMapLatest { id -> repository.getWorkspaceAgents(id) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val activeWorkspaceOnboarding: StateFlow<WorkspaceOnboardingEntity?> = _activeWorkspaceId
-        .flatMapLatest { id -> repository.getWorkspaceOnboarding(id) }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
-    private val _selectedUserAccount = MutableStateFlow<UserAccount?>(null)
-    val selectedUserAccount: StateFlow<UserAccount?> = _selectedUserAccount.asStateFlow()
-
+    // Multi-tenant workspace actions & actor resolution
     fun getCurrentActor(): UserAccount? {
         selectedUserAccount.value?.let { return it }
         
@@ -1393,52 +1484,6 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
             onComplete(newWorkspaceId)
         }
     }
-
-    // ==========================================
-    // AI WORKFLOW AUTOMATION ENGINE STATE & LOGIC
-    // ==========================================
-
-    val businessWorkflowConfig: StateFlow<BusinessWorkflowConfig> = repository.businessWorkflowConfig
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), BusinessWorkflowConfig())
-
-    val workflowTemplates: StateFlow<List<WorkflowTemplate>> = repository.workflowTemplates
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val approvalItems: StateFlow<List<ApprovalItem>> = repository.approvalItems
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val pendingApprovalItems: StateFlow<List<ApprovalItem>> = approvalItems
-        .map { list -> list.filter { it.status == ApprovalStatus.PENDING } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val completedApprovalItems: StateFlow<List<ApprovalItem>> = approvalItems
-        .map { list -> list.filter { it.status == ApprovalStatus.APPROVED || it.status == ApprovalStatus.COMPLETED } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val archivedApprovalItems: StateFlow<List<ApprovalItem>> = approvalItems
-        .map { list -> list.filter { it.status == ApprovalStatus.ARCHIVED || it.status == ApprovalStatus.REJECTED } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    private val _jobTasks = MutableStateFlow<List<JobEntity>>(if (prefs.getBoolean("app_demo_mode", false)) getInitialJobEntities() else emptyList())
-    val jobTasks: StateFlow<List<JobEntity>> = _jobTasks.asStateFlow()
-
-    val pendingJobs: StateFlow<List<JobEntity>> = _jobTasks
-        .map { list -> list.filter { it.status == "Pending" || it.status == "In Progress" || it.status == "Queued" } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val completedJobs: StateFlow<List<JobEntity>> = _jobTasks
-        .map { list -> list.filter { it.status == "Completed" } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val archivedJobs: StateFlow<List<JobEntity>> = _jobTasks
-        .map { list -> list.filter { it.status == "Archived" } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val aiActionLogs: StateFlow<List<AiActionLog>> = repository.aiActionLogs
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    val agentResponsibilities: StateFlow<List<AgentResponsibility>> = repository.agentResponsibilities
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun updateBusinessConfig(config: BusinessWorkflowConfig) {
         viewModelScope.launch {
@@ -1956,6 +2001,234 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
         _statusNotice.value = "Initiating multi-device task synchronization with Firebase Firestore..."
         firestoreSyncManager.seedTasksToFirestore(_jobTasks.value)
         firestoreSyncManager.seedApprovalsToFirestore(approvalItems.value)
+        viewModelScope.launch {
+            val agents = _firestoreActiveAgents.value.ifEmpty {
+                repository.getActiveWorkspaceAgents(_activeWorkspaceId.value).firstOrNull() ?: emptyList()
+            }
+            if (agents.isNotEmpty()) {
+                firestoreSyncManager.seedAgentsToFirestore(agents)
+            }
+        }
+    }
+
+    fun refreshActiveAgentsFromFirestore() {
+        viewModelScope.launch {
+            _isFetchingFirestoreAgents.value = true
+            try {
+                val cloudAgents = firestoreSyncManager.fetchActiveAgentsFromFirestore()
+                if (cloudAgents.isNotEmpty()) {
+                    _firestoreActiveAgents.value = cloudAgents
+                    _statusNotice.value = "Retrieved ${cloudAgents.size} active autonomous agents from Firestore."
+                } else {
+                    val local = repository.getActiveWorkspaceAgents(_activeWorkspaceId.value).firstOrNull() ?: emptyList()
+                    if (local.isNotEmpty()) {
+                        _firestoreActiveAgents.value = local
+                        firestoreSyncManager.seedAgentsToFirestore(local)
+                    }
+                    _statusNotice.value = "Active agents synchronized from Firestore (${_firestoreActiveAgents.value.size} active)."
+                }
+            } catch (t: Throwable) {
+                val local = repository.getActiveWorkspaceAgents(_activeWorkspaceId.value).firstOrNull() ?: emptyList()
+                if (_firestoreActiveAgents.value.isEmpty()) {
+                    _firestoreActiveAgents.value = local
+                }
+                _statusNotice.value = "Loaded active agents from local persistence."
+            } finally {
+                _isFetchingFirestoreAgents.value = false
+            }
+        }
+    }
+
+    fun syncAgentsToFirestore() {
+        viewModelScope.launch {
+            val agents = _firestoreActiveAgents.value.ifEmpty {
+                repository.getActiveWorkspaceAgents(_activeWorkspaceId.value).firstOrNull() ?: emptyList()
+            }
+            if (agents.isNotEmpty()) {
+                firestoreSyncManager.seedAgentsToFirestore(agents)
+                _statusNotice.value = "Synchronized ${agents.size} autonomous agents to Firestore."
+            }
+        }
+    }
+
+    fun pushAgentToFirestore(agent: AgentRegistryEntity) {
+        firestoreSyncManager.pushAgentUpdate(agent)
+    }
+
+    /**
+     * Define and create a new agent with a name and objective,
+     * adding it to the Firestore 'agents' collection and local storage.
+     */
+    fun createAndAddAgentToFirestore(
+        agentName: String,
+        objective: String,
+        department: String = "Operations",
+        agentType: String = AgentType.OPERATIONS_AGENT.name,
+        modelTier: String = "GEMINI_2_5_FLASH",
+        riskClassification: String = AgentEntityRiskLevel.LOW.name,
+        permissionLevel: String = "STANDARD",
+        capabilities: List<String> = listOf("Autonomous Execution", "Task Routing", "Real-Time Telemetry"),
+        onSuccess: (AgentRegistryEntity) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val cleanName = agentName.trim()
+                val cleanObjective = objective.trim()
+                if (cleanName.isBlank()) {
+                    onError("Agent name cannot be blank")
+                    return@launch
+                }
+                if (cleanObjective.isBlank()) {
+                    onError("Agent objective cannot be blank")
+                    return@launch
+                }
+
+                val randomSuffix = (1000..9999).random()
+                val agentId = "#AGT-${randomSuffix}"
+                val newAgent = AgentRegistryEntity(
+                    agentId = agentId,
+                    workspaceId = _activeWorkspaceId.value.ifBlank { "ws_default" },
+                    agentName = cleanName,
+                    agentDescription = cleanObjective,
+                    agentType = agentType,
+                    status = AgentStatus.ACTIVE.name,
+                    capabilityProfile = capabilities.joinToString(", "),
+                    permissionLevel = permissionLevel,
+                    riskClassification = riskClassification,
+                    modelTier = modelTier,
+                    createdBy = "USER_ADMIN",
+                    createdTimestamp = System.currentTimeMillis(),
+                    updatedTimestamp = System.currentTimeMillis(),
+                    assignedDepartment = department,
+                    assignedUsers = null
+                )
+
+                // 1. Add directly to Firestore 'agents' collection
+                val addedToFirestore = firestoreSyncManager.addAgentToFirestore(newAgent, cleanObjective)
+
+                // 2. Persist locally to repository
+                repository.insertAgent(newAgent)
+
+                // 3. Update active agents state flow
+                _firestoreActiveAgents.value = listOf(newAgent) + _firestoreActiveAgents.value.filter { it.agentId != newAgent.agentId }
+
+                // 4. Log AI action & audit event
+                val actionLog = AiActionLog(
+                    id = "act_${System.currentTimeMillis()}",
+                    timestamp = "Just now",
+                    agentName = cleanName,
+                    workflowTitle = "Agent Provisioned",
+                    triggerType = "AGENT_CREATION",
+                    actionSummary = "Created autonomous agent '$cleanName' with objective: $cleanObjective in Firestore 'agents' collection",
+                    approvalStatus = "Auto-Approved",
+                    executionTimeMs = 90L,
+                    outputArtifact = "Agent ID: $agentId"
+                )
+                repository.addAiActionLog(actionLog)
+
+                recordAuditEvent(
+                    actionType = "AGENT_CREATED_FIRESTORE",
+                    description = "Created autonomous agent '$cleanName' with objective '$cleanObjective' in Firestore 'agents' collection",
+                    resourceType = "AI_AGENT",
+                    resourceId = agentId,
+                    agentId = agentId,
+                    result = AuditResultStatus.SUCCESS
+                )
+
+                _statusNotice.value = if (addedToFirestore) {
+                    "Agent '$cleanName' added to Firestore 'agents' collection."
+                } else {
+                    "Agent '$cleanName' created and saved to active registry."
+                }
+
+                onSuccess(newAgent)
+            } catch (t: Throwable) {
+                val errMsg = t.message ?: "Failed to create agent"
+                _statusNotice.value = "Error creating agent: $errMsg"
+                onError(errMsg)
+            }
+        }
+    }
+
+    fun toggleAgentActiveInFirestore(agent: AgentRegistryEntity, isNowActive: Boolean) {
+        val newStatus = if (isNowActive) AgentStatus.ACTIVE.name else AgentStatus.INACTIVE.name
+        val updated = agent.copy(status = newStatus, updatedTimestamp = System.currentTimeMillis())
+        
+        // Update live state
+        _firestoreActiveAgents.value = if (isNowActive) {
+            if (_firestoreActiveAgents.value.none { it.agentId == updated.agentId }) {
+                _firestoreActiveAgents.value + updated
+            } else {
+                _firestoreActiveAgents.value.map { if (it.agentId == updated.agentId) updated else it }
+            }
+        } else {
+            _firestoreActiveAgents.value.filter { it.agentId != updated.agentId }
+        }
+
+        viewModelScope.launch {
+            try {
+                repository.updateAgent(updated)
+            } catch (_: Throwable) {}
+        }
+
+        // Push real-time to Firestore
+        firestoreSyncManager.pushAgentUpdate(updated)
+        _statusNotice.value = if (isNowActive) "Agent '${agent.agentName}' activated in Firestore." else "Agent '${agent.agentName}' paused in Firestore."
+        
+        recordAuditEvent(
+            actionType = if (isNowActive) "AGENT_ACTIVATED_FIRESTORE" else "AGENT_PAUSED_FIRESTORE",
+            description = "${if (isNowActive) "Activated" else "Paused"} autonomous agent '${agent.agentName}' in Firestore",
+            resourceType = "AI_AGENT",
+            resourceId = agent.agentId,
+            agentId = agent.agentId,
+            result = AuditResultStatus.SUCCESS
+        )
+    }
+
+    fun dispatchAutonomousTaskToAgent(
+        agent: AgentRegistryEntity,
+        taskTitle: String,
+        prompt: String,
+        priority: String = "High",
+        approvalRequired: Boolean = false
+    ) {
+        viewModelScope.launch {
+            val taskId = "#TSK-${(1000..9999).random()}"
+            val newJob = JobEntity(
+                id = taskId,
+                title = taskTitle,
+                clientName = "Autonomous System / ${agent.assignedDepartment ?: "Operations"}",
+                status = if (approvalRequired) "Pending Approval" else "In Progress",
+                assignedAgent = agent.agentName,
+                priority = priority,
+                dueDate = "Today",
+                approvalRequired = approvalRequired,
+                isApproved = !approvalRequired,
+                progress = 0.25f,
+                summary = prompt
+            )
+
+            // Update local state and push to Firestore
+            _jobTasks.value = listOf(newJob) + _jobTasks.value
+            firestoreSyncManager.pushTaskUpdate(newJob)
+
+            // Log AI action
+            val actionLog = AiActionLog(
+                id = "act_${System.currentTimeMillis()}",
+                timestamp = "Just now",
+                agentName = agent.agentName,
+                workflowTitle = taskTitle,
+                triggerType = "MANUAL_DISPATCH",
+                actionSummary = prompt,
+                approvalStatus = if (approvalRequired) "Pending Review" else "Auto-Approved",
+                executionTimeMs = 120L,
+                outputArtifact = "Task $taskId queued for execution"
+            )
+            repository.addAiActionLog(actionLog)
+
+            _statusNotice.value = "Autonomous task $taskId dispatched to '${agent.agentName}' via Firestore."
+        }
     }
 
     fun addWorkflowTemplate(template: WorkflowTemplate) {
