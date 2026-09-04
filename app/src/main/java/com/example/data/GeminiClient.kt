@@ -65,9 +65,9 @@ object GeminiClient {
                 }
             }
 
-            val url = "$BASE_URL$model:generateContent?key=$apiKey"
+            val url = "$BASE_URL$model:generateContent"
             val body = requestJson.toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder().url(url).post(body).build()
+            val request = Request.Builder().url(url).addHeader("x-goog-api-key", apiKey).post(body).build()
 
             val response = okHttpClient.newCall(request).execute()
             val responseBody = response.body?.string() ?: ""
@@ -137,9 +137,9 @@ object GeminiClient {
                 }
             }
 
-            val url = "$BASE_URL$model:generateContent?key=$apiKey"
+            val url = "$BASE_URL$model:generateContent"
             val body = requestJson.toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder().url(url).post(body).build()
+            val request = Request.Builder().url(url).addHeader("x-goog-api-key", apiKey).post(body).build()
 
             val response = okHttpClient.newCall(request).execute()
             val responseBody = response.body?.string() ?: ""
@@ -194,9 +194,9 @@ object GeminiClient {
                 put("contents", contentsArray)
             }
 
-            val url = "${BASE_URL}gemini-3.5-flash:generateContent?key=$apiKey"
+            val url = "${BASE_URL}gemini-3.5-flash:generateContent"
             val body = requestJson.toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder().url(url).post(body).build()
+            val request = Request.Builder().url(url).addHeader("x-goog-api-key", apiKey).post(body).build()
 
             val response = okHttpClient.newCall(request).execute()
             val responseBody = response.body?.string() ?: ""
@@ -252,9 +252,9 @@ object GeminiClient {
                 })
             }
 
-            val url = "${BASE_URL}gemini-3.1-pro-preview:generateContent?key=$apiKey"
+            val url = "${BASE_URL}gemini-3.1-pro-preview:generateContent"
             val body = requestJson.toString().toRequestBody("application/json".toMediaType())
-            val request = Request.Builder().url(url).post(body).build()
+            val request = Request.Builder().url(url).addHeader("x-goog-api-key", apiKey).post(body).build()
 
             val response = okHttpClient.newCall(request).execute()
             val responseBody = response.body?.string() ?: ""

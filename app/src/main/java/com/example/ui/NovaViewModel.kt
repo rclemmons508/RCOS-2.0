@@ -97,6 +97,9 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
     private val secureManager = SecureCredentialManager(application)
     private val prefs = application.getSharedPreferences("rcos_user_prefs", Context.MODE_PRIVATE)
 
+    // Real Firebase Authentication (replaces local demo/auto-login)
+    private val firebaseAuthManager = com.example.data.FirebaseAuthManager()
+
     // Real-Time Firebase Firestore Synchronization Engine
     private val firestoreSyncManager = FirestoreTaskSyncManager(viewModelScope)
     val firestoreSyncInfo: StateFlow<FirestoreSyncInfo> = firestoreSyncManager.syncInfo
@@ -820,16 +823,13 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun restoreSession() {
         viewModelScope.launch {
-            val savedEmail = secureManager.getNullableString("logged_in_email")
-            if (!savedEmail.isNullOrBlank()) {
-                val user = repository.getUserByEmail(savedEmail)
-                if (user != null) {
-                    _currentUser.value = user
-                    return@launch
-                }
+            // Check if user is already authenticated with Firebase
+            val user = firebaseAuthManager.getCurrentUser()
+            if (user != null) {
+                _currentUser.value = user
+                secureManager.saveString("logged_in_email", user.email)
             }
-            // Automatically log in as default demo user so user is never stuck at logon
-            loginAsDemoUser()
+            // If not authenticated, the user will see the Login screen (no more auto-login)
         }
     }
 
@@ -911,19 +911,14 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
 
         _isAuthLoading.value = true
         viewModelScope.launch {
-            val result = repository.registerUser(
-                email = email,
-                fullName = name,
-                passwordRaw = password,
-                companyName = if (company.isBlank()) "Enterprise Partner" else company,
-                industry = industry
-            )
+            // Use real Firebase Auth
+            val result = firebaseAuthManager.registerUser(email, password, name)
             _isAuthLoading.value = false
 
             result.onSuccess { user ->
                 _currentUser.value = user
                 secureManager.saveString("logged_in_email", user.email)
-                _statusNotice.value = "Welcome to RCOS Platform, ${user.fullName}!"
+                _statusNotice.value = "Account created! Welcome to RCOS Platform, ${user.fullName}!"
                 onSuccess()
             }.onFailure { err ->
                 _statusNotice.value = err.localizedMessage ?: "Registration failed."
@@ -942,7 +937,8 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
 
         _isAuthLoading.value = true
         viewModelScope.launch {
-            val result = repository.loginUser(email, password)
+            // Use real Firebase Auth
+            val result = firebaseAuthManager.loginUser(email, password)
 
             result.onSuccess { user ->
                 _isAuthLoading.value = false
@@ -956,35 +952,13 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 onSuccess()
             }.onFailure { err ->
-                // Auto-provision user on the fly so login NEVER gets stuck
-                val safePass = if (password.length >= 8) password else "Rcos_SecurePass_${System.currentTimeMillis() % 10000}"
-                val regResult = repository.registerUser(
-                    email = email,
-                    fullName = email.substringBefore("@").replace(".", " ").replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() },
-                    passwordRaw = safePass,
-                    companyName = "RCOS Enterprise Client",
-                    industry = "Technology & IT"
-                )
-                val salt = SecurityUtils.generateSalt()
-                val hash = SecurityUtils.hashPassword(safePass, salt)
-                val newUser = regResult.getOrNull() ?: UserEntity(
-                    email = email.lowercase(),
-                    fullName = email.substringBefore("@"),
-                    passwordHash = hash,
-                    salt = salt,
-                    companyName = "RCOS Enterprise Client",
-                    industry = "Technology & IT"
-                )
                 _isAuthLoading.value = false
-                _currentUser.value = newUser
-                secureManager.saveString("logged_in_email", newUser.email)
-                _statusNotice.value = "Welcome to RCOS Platform, ${newUser.fullName}!"
+                _statusNotice.value = err.localizedMessage ?: "Login failed. Please check your credentials."
                 recordAuditEvent(
-                    actionType = "LOGIN",
-                    description = "User '${newUser.email}' authenticated and provisioned.",
-                    result = AuditResultStatus.SUCCESS
+                    actionType = "LOGIN_FAILED",
+                    description = "Authentication failed for $email: ${err.message}",
+                    result = AuditResultStatus.FAILED
                 )
-                onSuccess()
             }
         }
     }
@@ -995,6 +969,7 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
             description = "User logged out.",
             result = AuditResultStatus.SUCCESS
         )
+        firebaseAuthManager.logout()
         _currentUser.value = null
         secureManager.remove("logged_in_email")
         _statusNotice.value = "Logged out from RCOS Multi-Agent System."

@@ -14,7 +14,7 @@ android {
   compileSdk = 36
 
   defaultConfig {
-    applicationId = "com.rcsolutions.rcos.app"
+    applicationId = "rcos.app.production"
     minSdk = 24
     targetSdk = 34
     versionCode = 1
