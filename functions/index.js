@@ -4,28 +4,17 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 admin.initializeApp();
 const db = admin.firestore();
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Initialize Gemini with environment variable
-const apiKey = process.env.GEMINI_API_KEY;
-const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
-
-/**
- * Cloud Function: Spawn Agent for Workflow
- * Executes an autonomous agent task using Gemini API
- */
+// ============================================
+// Cloud Function: Spawn Agent
+// ============================================
 exports.spawnAgent = functions.https.onCall(async (data, context) => {
-  // Verify user is authenticated
+  // Verify authentication
   if (!context.auth) {
     throw new functions.https.HttpsError(
       'unauthenticated',
       'User must be authenticated'
-    );
-  }
-
-  if (!genAI) {
-    throw new functions.https.HttpsError(
-      'failed-precondition',
-      'Gemini API is not configured. Set GEMINI_API_KEY environment variable.'
     );
   }
 
@@ -40,9 +29,9 @@ exports.spawnAgent = functions.https.onCall(async (data, context) => {
   } = data;
 
   try {
-    // Build agent system prompt
+    // Build agent prompt
     const systemPrompt = `You are an autonomous agent for the ${industry} industry.
-
+    
 Your Role: Help solve this business bottleneck: "${bottleneck}"
 
 Available Tools:
@@ -55,9 +44,8 @@ Respond with:
 1. Initial analysis of the problem
 2. Step-by-step action plan
 3. Expected outcomes
-4. Success metrics
 
-Be professional, actionable, and concise.`;
+Be professional and actionable.`;
 
     // Call Gemini API
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
@@ -77,7 +65,7 @@ Be professional, actionable, and concise.`;
       response: responseText,
       status: 'completed',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      executionTime: Date.now()
+      executionTime: new Date().getTime()
     });
 
     // Log to audit trail
@@ -85,12 +73,9 @@ Be professional, actionable, and concise.`;
       .collection('auditLogs').add({
         action: 'AGENT_SPAWNED',
         agentId,
-        agentType,
         timestamp: admin.firestore.FieldValue.serverTimestamp(),
         details: { industry, bottleneck }
       });
-
-    console.log(`Agent ${agentId} spawned successfully for user ${userId}`);
 
     return {
       success: true,
@@ -107,22 +92,14 @@ Be professional, actionable, and concise.`;
   }
 });
 
-/**
- * Cloud Function: Execute Workflow
- * Runs multiple agents in sequence or parallel
- */
+// ============================================
+// Cloud Function: Execute Workflow
+// ============================================
 exports.executeWorkflow = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError(
       'unauthenticated',
       'User must be authenticated'
-    );
-  }
-
-  if (!genAI) {
-    throw new functions.https.HttpsError(
-      'failed-precondition',
-      'Gemini API is not configured.'
     );
   }
 
@@ -146,28 +123,24 @@ exports.executeWorkflow = functions.https.onCall(async (data, context) => {
 
     // Execute agents in parallel
     const agentPromises = agentConfigs.map(config =>
-      executeAgentInWorkflow(userId, jobRef.id, config)
+      executeAgentInWorkflow(userId, jobRef, config)
     );
 
-    const results = await Promise.allSettled(agentPromises);
+    await Promise.all(agentPromises);
 
     // Mark job as complete
-    const completedCount = results.filter(r => r.status === 'fulfilled').length;
-    
+    const results = await db.collection('users').doc(userId)
+      .collection('jobs').doc(jobRef.id).get();
+
     await jobRef.update({
-      status: completedCount === agentConfigs.length ? 'completed' : 'partial_failure',
-      completedAt: admin.firestore.FieldValue.serverTimestamp(),
-      completedAgents: completedCount
+      status: 'completed',
+      completedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    console.log(`Workflow ${workflowId} executed with ${completedCount}/${agentConfigs.length} agents succeeding`);
-
     return {
-      success: completedCount === agentConfigs.length,
+      success: true,
       jobId: jobRef.id,
-      completedAgents: completedCount,
-      totalAgents: agentConfigs.length,
-      message: `Workflow executed: ${completedCount}/${agentConfigs.length} agents completed`
+      message: 'Workflow executed successfully'
     };
   } catch (error) {
     console.error('Error executing workflow:', error);
@@ -178,16 +151,11 @@ exports.executeWorkflow = functions.https.onCall(async (data, context) => {
   }
 });
 
-/**
- * Helper: Execute single agent in workflow
- */
-async function executeAgentInWorkflow(userId, jobId, config) {
+// Helper: Execute single agent in workflow
+async function executeAgentInWorkflow(userId, jobRef, config) {
   try {
     const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
     const result = await model.generateContent(config.prompt);
-
-    const jobRef = db.collection('users').doc(userId)
-      .collection('jobs').doc(jobId);
 
     await jobRef.update({
       results: admin.firestore.FieldValue.arrayUnion({
@@ -197,18 +165,15 @@ async function executeAgentInWorkflow(userId, jobId, config) {
       }),
       completedAgents: admin.firestore.FieldValue.increment(1)
     });
-
-    return { success: true };
   } catch (error) {
     console.error('Agent execution error:', error);
     throw error;
   }
 }
 
-/**
- * Cloud Function: Get Job Status
- * Retrieve the current status of a job
- */
+// ============================================
+// Cloud Function: Get Job Status
+// ============================================
 exports.getJobStatus = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError(
@@ -241,10 +206,9 @@ exports.getJobStatus = functions.https.onCall(async (data, context) => {
   }
 });
 
-/**
- * Cloud Function: Deep Reasoning
- * Uses extended thinking for complex problem solving
- */
+// ============================================
+// Cloud Function: Deep Reasoning (Extended Thinking)
+// ============================================
 exports.deepReasoning = functions.https.onCall(async (data, context) => {
   if (!context.auth) {
     throw new functions.https.HttpsError(
@@ -253,20 +217,13 @@ exports.deepReasoning = functions.https.onCall(async (data, context) => {
     );
   }
 
-  if (!genAI) {
-    throw new functions.https.HttpsError(
-      'failed-precondition',
-      'Gemini API is not configured.'
-    );
-  }
-
   const userId = context.auth.uid;
-  const { problem, problemContext = '' } = data;
+  const { problem, context: problemContext = '' } = data;
 
   try {
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.0-flash',
-      systemInstruction: 'You are an expert problem solver. Analyze deeply and provide thorough reasoning with actionable conclusions.'
+      systemInstruction: 'You are an expert problem solver. Analyze deeply and provide thorough reasoning.'
     });
 
     const prompt = `${problemContext ? problemContext + '\n\n' : ''}Problem: ${problem}`;
@@ -295,61 +252,24 @@ exports.deepReasoning = functions.https.onCall(async (data, context) => {
   }
 });
 
-/**
- * Scheduled Function: Cleanup Old Jobs
- * Automatically removes jobs older than 30 days
- */
+// ============================================
+// Scheduled Function: Cleanup Old Jobs
+// ============================================
 exports.cleanupOldJobs = functions.pubsub
   .schedule('every 24 hours')
   .onRun(async (context) => {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    try {
-      const snapshot = await db.collectionGroup('jobs')
-        .where('createdAt', '<', thirtyDaysAgo)
-        .limit(100)
-        .get();
+    const snapshot = await db.collectionGroup('jobs')
+      .where('createdAt', '<', thirtyDaysAgo)
+      .limit(100)
+      .get();
 
-      const batch = db.batch();
-      snapshot.docs.forEach(doc => batch.delete(doc.ref));
-      await batch.commit();
+    const batch = db.batch();
+    snapshot.docs.forEach(doc => batch.delete(doc.ref));
+    await batch.commit();
 
-      console.log(`Cleanup: Deleted ${snapshot.docs.length} old jobs`);
-      return null;
-    } catch (error) {
-      console.error('Cleanup error:', error);
-      return null;
-    }
-  });
-
-/**
- * Scheduled Function: Archive Completed Tasks
- * Moves completed jobs to archive collection
- */
-exports.archiveCompletedTasks = functions.pubsub
-  .schedule('every 6 hours')
-  .onRun(async (context) => {
-    try {
-      const snapshot = await db.collectionGroup('jobs')
-        .where('status', '==', 'completed')
-        .limit(50)
-        .get();
-
-      const batch = db.batch();
-      snapshot.docs.forEach(doc => {
-        const data = doc.data();
-        // Archive the document
-        batch.set(doc.ref.parent.parent.collection('archivedJobs').doc(doc.id), data);
-        // Remove from active jobs
-        batch.delete(doc.ref);
-      });
-      await batch.commit();
-
-      console.log(`Archived ${snapshot.docs.length} completed tasks`);
-      return null;
-    } catch (error) {
-      console.error('Archive error:', error);
-      return null;
-    }
+    console.log(`Cleaned up ${snapshot.docs.length} old jobs`);
+    return null;
   });
