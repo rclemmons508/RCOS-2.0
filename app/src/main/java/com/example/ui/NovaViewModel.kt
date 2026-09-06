@@ -356,23 +356,23 @@ class NovaViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // Load profile from secure storage
-        val savedName = secureManager.getString("profile_full_name", "RCS Executive User")
+        val savedName = secureManager.getString("profile_full_name", "RCOS Executive User")
         val savedTitle = secureManager.getString("profile_title", "Chief Executive Officer")
         val savedEmail = secureManager.getString("profile_email", "rcsolutions@gmail.com")
-        val savedPhone = secureManager.getString("profile_phone", "+1 (555) 100-2000")
+        val savedPhone = secureManager.getString("profile_phone", "+1 (470)-783-2596")
         val savedGoogleEmail = secureManager.getString("profile_google_email", "rcsolutions@gmail.com")
-        val savedMsEmail = secureManager.getString("profile_ms_email", "executive@rcsolutions.onmicrosoft.com")
-        val savedOrg = secureManager.getString("profile_org_name", "RCOS Global Solutions")
+        val savedMsEmail = secureManager.getString("profile_ms_email", "rcsolutions@outlook.com")
+        val savedOrg = secureManager.getString("profile_org_name", "RC Solutions")
         val savedTz = secureManager.getString("profile_timezone", "EST - Eastern Time (US & Canada)")
 
         _userProfile.value = UserProfileData(
-            fullName = savedName.ifBlank { "RCS Executive User" },
+            fullName = savedName.ifBlank { "RCOS Executive User" },
             executiveTitle = savedTitle.ifBlank { "Chief Executive Officer" },
             personalEmail = savedEmail.ifBlank { "rcsolutions@gmail.com" },
-            phone = savedPhone.ifBlank { "+1 (555) 100-2000" },
+            phone = savedPhone.ifBlank { "+1 (470)-783-2596" },
             googleWorkspaceEmail = savedGoogleEmail.ifBlank { "rcsolutions@gmail.com" },
-            microsoftAccountEmail = savedMsEmail.ifBlank { "executive@rcsolutions.onmicrosoft.com" },
-            organizationName = savedOrg.ifBlank { "RCOS Global Solutions" },
+            microsoftAccountEmail = savedMsEmail.ifBlank { "rcsolutions@outlook.com" },
+            organizationName = savedOrg.ifBlank { "RC Solutions" },
             timezone = savedTz.ifBlank { "EST - Eastern Time (US & Canada)" }
         )
 
