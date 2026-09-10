@@ -1,0 +1,49 @@
+name: Firebase Test Lab Run
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Check out code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Set up Java environment
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17' # Match your app's Java/Kotlin version
+
+      # 3. Build APK and Test APK
+      - name: Build APKs with Gradle
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug assembleDebugAndroidTest
+
+      # 4. Authenticate with Google Cloud
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }} # Set this in GitHub Secrets
+
+      # 5. Set up Google Cloud SDK
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # 6. Run Android tests in Test Lab
+      - name: Run Test Lab
+        run: |
+          gcloud config set project rcos-2897c
+          gcloud firebase test android run \
+            --type instrumentation \
+            --app app/build/outputs/apk/debug/app-debug.apk \
+            --test app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk \
+            --device model=Pixel3,version=28,locale=en,orientation=portrait
+
